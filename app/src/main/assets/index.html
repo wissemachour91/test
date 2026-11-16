@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Toon Studio</title>
+<style>
+  body{font-family:sans-serif;margin:0;background:#12121a;color:#eee}
+  header{padding:16px;background:#6c3df4;font-size:20px;font-weight:bold}
+  section{padding:14px;border-bottom:1px solid #2a2a3a}
+  input,textarea,select,button{width:100%;box-sizing:border-box;margin:5px 0;padding:10px;border-radius:8px;border:0;font-size:15px}
+  input,textarea,select{background:#1f1f2e;color:#eee}
+  button{background:#ff4d6d;color:#fff;font-weight:bold}
+  button.sec{background:#34344a}
+  .ep{background:#1f1f2e;border-radius:10px;padding:10px;margin:8px 0}
+  .tag{font-size:12px;opacity:.7}
+  video{width:100%;border-radius:8px;margin-top:8px}
+  pre{white-space:pre-wrap;font-size:12px;background:#0b0b12;padding:8px;border-radius:8px;max-height:160px;overflow:auto}
+  details summary{padding:6px 0}
+</style>
+</head>
+<body>
+<header>🎬 Toon Studio</header>
+
+<section>
+  <details id="cfg">
+    <summary><b>⚙️ Impostazioni</b> (una tantum)</summary>
+    <label>Gemini API key (gratis su aistudio.google.com)</label>
+    <input id="gemKey" type="password">
+    <label>URL server render (dal notebook Colab)</label>
+    <input id="srvUrl" placeholder="https://xxxx.trycloudflare.com">
+    <label>Google OAuth Client ID (tipo "TV e dispositivi con input limitato")</label>
+    <input id="ytId">
+    <label>Client Secret</label>
+    <input id="ytSecret" type="password">
+    <button class="sec" onclick="saveCfg()">Salva</button>
+    <button class="sec" onclick="ytLogin()">Collega canale YouTube</button>
+    <div id="ytStatus" class="tag"></div>
+  </details>
+</section>
+
+<section>
+  <h3>Nuova serie</h3>
+  <input id="niche" placeholder="Niche (es. animali della fattoria per bambini)">
+  <input id="chars" placeholder="Personaggi (es. Pippo il pulcino, Luna la mucca)">
+  <select id="lang"><option>Italiano</option><option>English</option></select>
+  <label>Durata puntata (minuti, max 30)</label>
+  <input id="mins" type="number" value="10" min="1" max="30">
+  <label>Numero di puntate</label>
+  <input id="count" type="number" value="3" min="1" max="20">
+  <button onclick="makeSeries()">Genera storie e regia</button>
+</section>
+
+<section>
+  <h3>Puntate</h3>
+  <div id="eps"></div>
+</section>
+
+<section><pre id="log"></pre></section>
+
+<script>
+const $ = id => document.getElementById(id);
+const cbs = {};
+let cbN = 0;
+window.__cb = (id, json) => { const f = cbs[id]; delete cbs[id]; if (f) f(JSON.parse(json)); };
+
+function nhttp(method, url, headers, body) {
+  return new Promise(res => {
+    const id = "c" + (++cbN);
+    cbs[id] = r => res(r);
+    Native.http(id, method, url, headers || "", body || "");
+  });
+}
+async function jhttp(method, url, headers, body) {
+  const r = await nhttp(method, url, headers, body);
+  let j = null; try { j = JSON.parse(r.body); } catch (e) {}
+  return { status: r.status, json: j, text: r.body };
+}
+function log(m) { $("log").textContent = (new Date().toLocaleTimeString()) + " " + m + "\n" + $("log").textContent; }
+
+const S = {
+  get(k, d) { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch (e) { return d; } },
+  set(k, v) { localStorage.setItem(k, JSON.stringify(v)); }
+};
+
+function loadCfg() {
+  const c = S.get("cfg", {});
+  ["gemKey","srvUrl","ytId","ytSecret"].forEach(k => $(k).value = c[k] || "");
+  const t = S.get("yt", null);
+  $("ytStatus").textContent = t && t.refresh ? "✅ Canale collegato" : "Canale non collegato";
+}
+function saveCfg() {
+  const c = {};
+  ["gemKey","srvUrl","ytId","ytSecret"].forEach(k => c[k] = $(k).value.trim().replace(/\/$/, ""));
+  S.set("cfg", c); log("Impostazioni salvate");
+}
+
+// ---------- Gemini: storia + regia ----------
+async function gemini(prompt) {
+  const k = S.get("cfg", {}).gemKey;
+  if (!k) throw new Error("Manca la Gemini API key");
+  const url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + k;
+  const body = JSON.stringify({
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: { responseMimeType: "application/json", temperature: 0.9 }
+  });
+  const r = await jhttp("POST", url, "Content-Type: application/json", body);
+  if (r.status !== 200) throw new Error("Gemini " + r.status + ": " + r.text.slice(0, 200));
+  return JSON.parse(r.json.candidates[0].content.parts[0].text);
+}
+
+async function makeSeries() {
+  saveCfg();
+  const niche = $("niche").value, chars = $("chars").value, lang = $("lang").value;
+  const mins = Math.min(30, +$("mins").value || 10), count = +$("count").value || 1;
+  const scenes = Math.round(mins * 60 / 8);
+  try {
+    log("Creo il piano della serie...");
+    const plan = await gemini(
+      `Sei uno showrunner di cartoni 3D per bambini. Niche: ${niche}. Personaggi fissi: ${chars}. Lingua: ${lang}.` +
+      ` Crea ${count} idee di puntata DIVERSE. Rispondi JSON: {"seriesTitle":str,"look":str (descrizione fissa dello stile 3D e dei personaggi per coerenza visiva),"episodes":[{"title":str,"logline":str}]}`);
+    const eps = S.get("eps", []);
+    for (const [i, e] of plan.episodes.entries()) {
+      log(`Scrivo puntata ${i + 1}/${count}: ${e.title}`);
+      const sc = await gemini(
+        `Scrivi la sceneggiatura completa e la regia della puntata "${e.title}" (${e.logline}) della serie "${plan.seriesTitle}". Lingua: ${lang}.` +
+        ` Stile visivo fisso: ${plan.look}. Durata totale ${mins} minuti = circa ${scenes} scene da ~8 secondi, con inizio, sviluppo, climax e finale con morale.` +
+        ` Includi una canzoncina ripetuta. Rispondi JSON: {"music":str (prompt musicale),"scenes":[{"visual":str (inquadratura 3D, camera, azione, luogo),"camera":"zoom_in|zoom_out|pan_left|pan_right","speaker":str,"line":str (battuta o narrazione),"voice":"narrator|child|female|male"}]}`);
+      eps.push({ id: Date.now() + i, series: plan.seriesTitle, look: plan.look, title: e.title,
+                 script: sc, lang, status: "script", jobId: null, mins });
+      S.set("eps", eps); renderEps();
+    }
+    log("Fatto. Ora premi 'Renderizza' su ogni puntata.");
+  } catch (err) { log("Errore: " + err.message); }
+}
+
+// ---------- Render sul server ----------
+async function render(id) {
+  const eps = S.get("eps", []), e = eps.find(x => x.id === id), cfg = S.get("cfg", {});
+  if (!cfg.srvUrl) return log("Manca l'URL del server render");
+  const r = await jhttp("POST", cfg.srvUrl + "/render", "Content-Type: application/json\nngrok-skip-browser-warning: 1",
+    JSON.stringify({ title: e.title, look: e.look, script: e.script, lang: e.lang }));
+  if (r.status !== 200) return log("Server errore " + r.status + ": " + r.text.slice(0, 200));
+  e.jobId = r.json.job; e.status = "rendering"; S.set("eps", eps); renderEps();
+  log("Render avviato: " + e.title);
+}
+async function poll() {
+  const eps = S.get("eps", []), cfg = S.get("cfg", {});
+  let ch = false;
+  for (const e of eps.filter(x => x.status === "rendering")) {
+    const r = await jhttp("GET", cfg.srvUrl + "/status/" + e.jobId, "ngrok-skip-browser-warning: 1");
+    if (r.json) {
+      e.progress = r.json.progress;
+      if (r.json.state === "done") { e.status = "review"; log("Pronto per approvazione: " + e.title); }
+      if (r.json.state === "error") { e.status = "script"; log("Errore render: " + r.json.error); }
+      ch = true;
+    }
+  }
+  if (ch) { S.set("eps", eps); renderEps(); }
+}
+setInterval(() => { if (S.get("eps", []).some(x => x.status === "rendering")) poll(); }, 15000);
+
+// ---------- YouTube ----------
+async function ytLogin() {
+  saveCfg();
+  const c = S.get("cfg", {});
+  const r = await jhttp("POST", "https://oauth2.googleapis.com/device/code", "Content-Type: application/x-www-form-urlencoded",
+    "client_id=" + encodeURIComponent(c.ytId) + "&scope=" + encodeURIComponent("https://www.googleapis.com/auth/youtube.upload"));
+  if (!r.json || !r.json.device_code) return log("OAuth errore: " + r.text);
+  alert("Apri " + r.json.verification_url + " sul telefono e inserisci il codice:\n\n" + r.json.user_code + "\n\nPoi torna qui: il collegamento termina da solo.");
+  const t0 = Date.now();
+  while (Date.now() - t0 < r.json.expires_in * 1000) {
+    await new Promise(z => setTimeout(z, (r.json.interval || 5) * 1000));
+    const p = await jhttp("POST", "https://oauth2.googleapis.com/token", "Content-Type: application/x-www-form-urlencoded",
+      "client_id=" + encodeURIComponent(c.ytId) + "&client_secret=" + encodeURIComponent(c.ytSecret) +
+      "&device_code=" + r.json.device_code + "&grant_type=urn:ietf:params:oauth:grant-type:device_code");
+    if (p.json && p.json.refresh_token) {
+      S.set("yt", { refresh: p.json.refresh_token }); loadCfg(); return log("Canale YouTube collegato ✅");
+    }
+    if (p.json && p.json.error && p.json.error !== "authorization_pending" && p.json.error !== "slow_down") return log("OAuth: " + p.text);
+  }
+}
+async function ytToken() {
+  const c = S.get("cfg", {}), t = S.get("yt", null);
+  if (!t) throw new Error("Collega prima il canale YouTube");
+  const p = await jhttp("POST", "https://oauth2.googleapis.com/token", "Content-Type: application/x-www-form-urlencoded",
+    "client_id=" + encodeURIComponent(c.ytId) + "&client_secret=" + encodeURIComponent(c.ytSecret) +
+    "&refresh_token=" + encodeURIComponent(t.refresh) + "&grant_type=refresh_token");
+  if (!p.json || !p.json.access_token) throw new Error("Token: " + p.text);
+  return p.json.access_token;
+}
+async function approve(id) {
+  const eps = S.get("eps", []), e = eps.find(x => x.id === id), cfg = S.get("cfg", {});
+  try {
+    const tok = await ytToken();
+    e.status = "uploading"; S.set("eps", eps); renderEps(); log("Upload su YouTube: " + e.title);
+    const meta = JSON.stringify({
+      snippet: { title: e.title + " | " + e.series, description: e.series + " - " + e.title + "\n\nCartone animato originale.", categoryId: "1" },
+      status: { privacyStatus: "public", selfDeclaredMadeForKids: true }
+    });
+    const cbid = "u" + (++cbN);
+    const r = await new Promise(res => { cbs[cbid] = res; Native.uploadYoutube(cbid, cfg.srvUrl + "/video/" + e.jobId, tok, meta); });
+    if (r.status === 200) { e.status = "published"; log("✅ Pubblicato: " + e.title); }
+    else { e.status = "review"; log("Upload fallito " + r.status + ": " + r.body.slice(0, 200)); }
+  } catch (err) { e.status = "review"; log("Errore: " + err.message); }
+  S.set("eps", eps); renderEps();
+}
+function reject(id) { S.set("eps", S.get("eps", []).filter(x => x.id !== id)); renderEps(); }
+
+function renderEps() {
+  const cfg = S.get("cfg", {});
+  $("eps").innerHTML = S.get("eps", []).map(e => `
+    <div class="ep"><b>${e.title}</b><div class="tag">${e.series} · ${e.mins} min · ${e.script.scenes.length} scene · ${e.status}${e.progress ? " " + e.progress : ""}</div>
+    ${e.status === "script" ? `<button onclick="render(${e.id})">🎞️ Renderizza</button>` : ""}
+    ${e.status === "review" ? `<video controls src="${cfg.srvUrl}/video/${e.jobId}"></video>
+      <button onclick="approve(${e.id})">✅ Approva e pubblica su YouTube</button>` : ""}
+    <button class="sec" onclick="reject(${e.id})">🗑️ Elimina</button></div>`).join("");
+}
+loadCfg(); renderEps();
+</script>
+</body>
+</html>
